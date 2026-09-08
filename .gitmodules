@@ -1,0 +1,3 @@
+[submodule "monksynth"]
+	path = monksynth
+	url = git@github.com:JonET/monksynth.git
