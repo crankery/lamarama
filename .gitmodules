@@ -1,3 +1,6 @@
 [submodule "monksynth"]
 	path = monksynth
 	url = git@github.com:JonET/monksynth.git
+[submodule "src/st7789_mpy"]
+	path = src/st7789_mpy
+	url = git@github.com:russhughes/st7789_mpy.git
