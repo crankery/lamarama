@@ -524,7 +524,7 @@
     "last_paths": {
       "idf": "",
       "netlist": "",
-      "plot": "",
+      "plot": "../gerbers/control/",
       "specctra_dsn": "",
       "vrml": ""
     },
@@ -678,7 +678,7 @@
         "uuid": "d1915262-9239-4820-b50c-061fffa7cba0"
       }
     ],
-    "used_designators": "LOGO2",
+    "used_designators": "LOGO2-3",
     "variants": []
   },
   "sheets": [
