@@ -51,6 +51,7 @@ add_executable(lama
     audio_debug.c
     cv_input.c
     cv_pitch.c
+    vowel_controls.c
     calibration.c
     settings.c
     settings_flash.c

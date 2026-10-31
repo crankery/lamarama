@@ -23,10 +23,13 @@
 
 static void adc_updated(InputAdc adc, unsigned channel, uint16_t value)
 {
-    if (adc == INPUT_ADC_PICO && channel == 0)
+    if (adc == INPUT_ADC_PICO)
     {
-        cv_input_pitch(value);
-        calibration_sample(CAL_PICO, value);
+        cv_input_adc(channel, value);
+        if (channel == 0)
+        {
+            calibration_sample(CAL_PICO, value);
+        }
     }
 
     if (adc == INPUT_ADC_MCP3208 && channel == 4)

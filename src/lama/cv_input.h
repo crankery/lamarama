@@ -7,6 +7,7 @@
 #define CV_ZERO_NOTE 36.0f /* C2; user calibration can change this later */
 float cv_pitch_hz(uint16_t raw);
 void cv_input_init(void);
-void cv_input_pitch(uint16_t raw);
+/* ADC0 pitch, ADC1 vowel CV, ADC2 vowel pot. */
+void cv_input_adc(unsigned channel, uint16_t raw);
 void cv_input_poll(void);
 #endif

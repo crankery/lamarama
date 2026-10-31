@@ -256,7 +256,7 @@ notes 36..84 (approximately 65.4..1046.5 Hz); ATTACK and DECAY span 0..2 seconds
 and RELEASE spans 0..4 seconds. CV uses the same raw ADC range for now; bipolar
 scaling, offsets, modulation depth and per-input calibration are future work.
 MIDI notes and controllers have priority as described below. Pico ADC0 and gate GP20 now provide a separate default CV playing path;
-ADC1/2 remain available without fixed voice mappings.
+ADC1/2 now feed the dedicated vowel CV/pot combination.
 
 Encoder quadrature edges are captured by a small GPIO interrupt handler on
 core 0 and accumulated to four edges per detent. Illegal two-bit transitions
@@ -429,8 +429,8 @@ normalized values. Calibration changes force unchanged assigned readings to
 refresh; the dedicated Pico pitch path also refreshes when its bank changes.
 
 Pico frequency voltage additionally divides ADC-pin voltage by 0.6, then uses
-1 V/oct with C2 at 0 V. Corrected Pico ADC1/2 values are available in snapshots
-for future vowel routing; the unused vowel controls gain no fixed mapping.
+1 V/oct with C2 at 0 V. Corrected Pico ADC1/2 values feed the dedicated vowel CV/pot combination
+and remain available in snapshots.
 
 Reset defaults restores OFF assignments and nominal calibration for **both**
 converters in RAM. A separate Save settings makes that reset persistent.
@@ -469,4 +469,46 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I. \
     calibration.c settings_format.c settings.c routing.c voice.c \
     tests/settings_memory.c tests/test_settings.c -lm -o /tmp/lama-test-settings
 /tmp/lama-test-settings
+```
+
+
+## Dedicated vowel pot and CV
+
+GP28 / Pico ADC2 reads VOWEL_POT; GP27 / ADC1 reads VOWEL_CV. Both use the
+shared Pico calibration. The main input hook caches their raw readings, then
+`vowel_controls.c` combines them on core 0 after a complete scan.
+
+The pot supplies a bipolar offset: full left = -1, center = 0, full right = +1.
+The voice accepts a 0..1 vowel position, so this offset is scaled around 0.5:
+
+```text
+pot_offset = 2 * calibrated_pot_normalized - 1
+cv_volts = calibrated_cv_adc_volts / 0.6
+vowel = clamp(0.5 + 0.5 * pot_offset + 0.1 * max(cv_volts, 0), 0, 1)
+```
+
+With zero CV, left/center/right select vowel 0/0.5/1. At center, +1 V CV gives
+0.6 and +5 V gives 1.0. The dedicated vowel CV path has a 20K/30K divider and
+unity buffer, without the bipolar offset on the assignable MCP CV inputs.
+It therefore measures unipolar 0..5 V; negative jack voltage is clipped by the
+input/ADC protection and cannot produce negative modulation readings.
+`VOWEL_CV_DEPTH` and `VOWEL_CV_FULL_SCALE_VOLTS` in `vowel_controls.h` specify
+the initial depth (0.5 voice-vowel units per 5 V), ready for listening tests.
+
+No output is sent before both inputs have real readings. Small combined-value
+changes below 4/4095 are suppressed, with at most one update per 5 ms.
+Queue failures retry; Pico calibration changes force a refresh even when the
+raw readings are unchanged. The combined value goes through the same MIDI
+priority/handback logic as other ADC parameters. External inputs assigned to
+vowel retain the existing most-recently-changed-source behavior. The monk
+follows the resulting voice vowel through the existing audio state snapshot.
+
+Checks cover pot endpoints/center, CV addition and clamping, calibration,
+startup validity, noise/rate limits, queue retry, and MIDI handback:
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I. \
+    vowel_controls.c calibration.c voice_control.c voice.c \
+    tests/test_vowel_controls.c -lm -o /tmp/lama-test-vowel
+/tmp/lama-test-vowel
 ```

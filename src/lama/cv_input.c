@@ -1,24 +1,32 @@
 #include "cv_input.h"
 #include "messenger.h"
 #include "calibration.h"
+#include "vowel_controls.h"
 #include "pico/stdlib.h"
 
 static bool pitch_valid, pitch_sent, gate_sent, last_gate;
 static uint16_t pitch_raw, last_pitch;
 static uint64_t last_gate_at;
 static uint32_t pitch_revision;
+static VowelControls vowel;
 
 void cv_input_init(void)
 {
+    vowel_controls_init(&vowel);
     gpio_init(GATE_PIN);
     gpio_set_dir(GATE_PIN, GPIO_IN);
     gpio_pull_up(GATE_PIN); /* LM393 open collector, active low */
 }
 
-void cv_input_pitch(uint16_t raw)
+void cv_input_adc(unsigned channel, uint16_t raw)
 {
-    pitch_raw = raw;
-    pitch_valid = true;
+    if (channel == 0)
+    {
+        pitch_raw = raw;
+        pitch_valid = true;
+    }
+
+    vowel_controls_sample(&vowel, channel, raw);
 }
 
 void cv_input_poll(void)
@@ -43,6 +51,7 @@ void cv_input_poll(void)
 
     bool gate = !gpio_get(GATE_PIN);
     uint64_t now = time_us_64();
+    vowel_controls_poll(&vowel, now);
     // Periodic status recovers CV after queue overflow. The audio-side gate
     // handler is idempotent, so a held gate does not retrigger the envelope.
     if (!gate_sent || gate != last_gate || now - last_gate_at >= 10000)
