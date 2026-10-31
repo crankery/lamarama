@@ -3,10 +3,10 @@
 | Peripheral     | Hardware handling  | CPU involvement                 |
 | -------------- | ------------------ | ------------------------------- |
 | MCP4821 DAC    | PIO + DMA          | Fill next audio buffer          |
-| MCP3008 ADC    | PIO + DMA          | Read latest control values      |
+| MCP3208 ADC    | PIO                | Queue scans and collect results |
 | LCD Hardware   | SPI + DMA          | Prepare changed display regions |
-| Pitch CV       | Internal ADC + DMA | Process sampled voltage         |
-| Gate input     | GPIO interrupt     | Handle gate transition          |
+| Pico ADC0–2    | Internal ADC       | Start and collect conversions   |
+| Gate input     | GPIO polling       | Track active-low gate state     |
 | Rotary encoder | PIO                | Read accumulated movement       |
 | Buttons        | GPIO               | Poll at UI refresh rate         |
 
@@ -14,32 +14,32 @@
 
 | GPIO        | Assignment          | Peripheral     |
 | ----------- | ------------------- | -------------- |
-| GP0         | Unused              | —              |
+| GP0         | Debug probe TX      | UART0 TX       |
 | GP1         | LCD CS              | SPI0           |
 | GP2         | LCD SCK             | SPI0           |
 | GP3         | LCD MOSI            | SPI0           |
 | GP4         | LCD D/C             | LCD            |
 | GP5         | LCD RESET           | LCD            |
 | GP6         | LCD backlight PWM   | LCD            |
-| GP7         | ADC CS              | MCP3008 PIO    |
-| GP8         | ADC SCK             | MCP3008 PIO    |
-| GP9         | ADC MOSI            | MCP3008 PIO    |
-| GP10        | ADC MISO            | MCP3008 PIO    |
+| GP7         | ADC CS              | MCP3208 PIO    |
+| GP8         | ADC SCK             | MCP3208 PIO    |
+| GP9         | ADC MOSI            | MCP3208 PIO    |
+| GP10        | ADC DOUT            | MCP3208 PIO    |
 | GP11        | DAC CS              | MCP4821 PIO    |
 | GP12        | DAC SCK             | MCP4821 PIO    |
 | GP13        | DAC MOSI            | MCP4821 PIO    |
-| GP14        | DAC LDAC (optional) | MCP4821        |
-| GP15        | Gate input          | GPIO interrupt |
+| GP14        | DAC LDAC            | MCP4821 PIO    |
+| GP15        | Unused              | —              |
 | GP16        | Encoder A           | PIO            |
 | GP17        | Encoder B           | PIO            |
 | GP18        | Encoder push        | GPIO           |
 | GP19        | Back/Cancel         | GPIO           |
-| GP20        | Spare               | —              |
-| GP21        | Spare (MIDI IN)     | —              |
+| GP20        | Gate input          | GPIO polling   |
+| GP21        | MIDI IN (pin 27)    | UART1 RX       |
 | GP22        | Spare               | —              |
-| GP26 / ADC0 | Pitch CV            | Internal ADC   |
-| GP27 / ADC1 | Spare analog        | —              |
-| GP28 / ADC2 | Spare analog        | —              |
+| GP26 / ADC0 | FREQ_CV             | Internal ADC   |
+| GP27 / ADC1 | VOWEL_CV            | Internal ADC   |
+| GP28 / ADC2 | VOWEL_POT           | Internal ADC   |
 
 ### Other Connections
 
@@ -47,3 +47,426 @@
 | -------------------------- | ---------------------------- |
 | ADC_VREF (physical pin 35) | LM4040C30ILPR 3.0V reference |
 | AGND (physical pin 33)     | Analog ground                |
+
+## MIDI input
+
+TRS MIDI is received on GP21 (physical Pico 2 pin 27), using UART1 at
+31250 baud, 8 data bits, no parity, and 1 stop bit. This expects the decoded
+logic signal from the board's MIDI input receiver at GP21.
+
+`MIDI_CHANNEL` in `midi.h` selects the one-based channel (default 1).
+Core 0 polls the UART; keep the UI loop responsive, servicing it well within
+10 ms so the 32-byte FIFO does not overflow. Events cross the messenger queue
+and update the voice on core 1 at audio buffer boundaries.
+
+- Notes use last-note priority; releasing the newest held note restores the
+  previous one. Note On with velocity zero acts as Note Off.
+- Pitch wheel controls vowel (classic Monksynth mapping).
+- CC1 controls vibrato, CC5 glide, CC7 level, and CC13 voice character.
+- CC120, CC123, and System Reset release all held notes. Queue overflow or
+  UART receive errors also release notes to recover from missing Note Offs.
+- CC12 delay is currently unsupported because this project has no delay engine.
+- Velocity is delivered to the voice API, which currently ignores it.
+- Sustain pedal and active sensing timeouts are not implemented.
+
+ADC acquisition publishes unassigned raw readings. Arbitration between CV
+gate/pitch and MIDI remains to be defined when parameter routing is added.
+MIDI source tags give controller updates temporary ownership over ADC updates.
+
+Host parser check (no Pico hardware required):
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -I. midi.c tests/test_midi.c -o /tmp/lama-test-midi
+/tmp/lama-test-midi
+```
+
+## DAC playback
+
+The MCP4821 uses GP11 CS, GP12 SCK, GP13 SDI, and GP14 LDAC.
+GP10 belongs exclusively to MCP3208 DOUT.
+
+PIO0 uses one claimed state machine to send 16-bit commands MSB first and
+pulse LDAC once per sample. Each frame takes 256 PIO cycles. The divider is
+rounded to the nearest 1/256 to target 44.1 kHz from the current system clock;
+at the default 150 MHz this gives approximately 44104.68 samples/second
+(+106.0 ppm). Do not change clk_sys after initializing playback.
+
+Two 256-sample buffers alternate through FREE → FILLING → READY → PLAYING.
+Core 1 acquires a free buffer, renders samples and packs the DAC commands,
+then submits it. Both initial buffers are filled before playback starts.
+A PIO TX DREQ paces a single DMA channel. DMA IRQ1 on core 1 releases the
+completed RAM buffer and starts the next ready buffer; the joined eight-word
+TX FIFO bridges the interrupt handoff. A buffer is safe to refill as soon as
+DMA has copied it, even while its final samples are still in the PIO FIFO.
+
+This gives about 5.8 ms to render each block. If rendering or interrupt
+handling misses its deadline, the PIO finishes its queued samples and stalls
+with CS and LDAC high, holding the last output. Submitting the next buffer
+resumes playback without reading a buffer that is being filled. This recovery
+can cause an audible dropout; hardware performance remains to be measured.
+
+The command uses 1x gain and active output (0x3000 | sample), mapping the
+signed audio range to 12-bit unsigned codes. The MCP4821 uses its internal
+2.048 V reference; SHDN must be high for playback.
+
+Run `python3 tests/test_dac_pio.py` to check sample frame length, bit ordering,
+clock edges, and LDAC sequencing. Firmware build and waveform simulation do
+not replace a logic-analyzer check on the actual board.
+
+
+## ADC acquisition
+
+`input_init()` initializes the three Pico ADC inputs on GP26–28 and a PIO1
+state machine for the MCP3208: CS GP7, CLK GP8, DIN GP9, DOUT GP10.
+`poll_controls()` runs on core 0 in the main loop alongside MIDI polling.
+It starts a new scan no more often than every 1 ms, then collects conversions
+without waiting for either converter. The MCP3208 SPI clock is 500 kHz;
+PIO completes each 24-clock transaction independently of CPU polling.
+The Pico conversions use the internal ADC hardware in single-shot mode.
+There is no ADC DMA or ADC interrupt handler.
+
+A scan takes roughly 0.4 ms plus UI polling overhead. If the main loop slows
+down, scanning slows down rather than accumulating a backlog. The ADC driver emits no parameter messages itself; the update hook routes
+assigned external channels through the messenger. Channels have no fixed
+voice assignments.
+
+`input_get_snapshot(&snapshot)` returns false until the first valid scan.
+Thereafter it copies the most recent complete scan under a short lock:
+
+```c
+InputSnapshot snapshot;
+if (input_get_snapshot(&snapshot)) {
+    // snapshot.pico[0..2]: ADC0..2, GP26..28
+    // snapshot.external[0..7]: MCP3208 CH0..7
+    // snapshot.pico_normalized[] / external_normalized[]: calibrated 0..1
+    // snapshot.sequence: increments for each published scan
+    // snapshot.timestamp_us: scan completion time
+}
+```
+
+The `pico[]` and `external[]` arrays remain raw unsigned 12-bit values, 0..4095.
+`pico_normalized[]` and `external_normalized[]` provide calibrated 0..1 values
+using each converter's shared calibration. Channels are sampled
+sequentially, not simultaneously. A Pico conversion error discards the scan.
+Snapshots can be read from either core after initialization, outside ISRs;
+initialize once on core 0 before launching the audio core.
+
+Run `python3 tests/test_mcp3208_pio.py` for command/response waveform tests
+across all eight channels. Actual analog readings and scan rate still need
+verification on the board.
+
+
+### ADC update hook
+
+`adc_updated(InputAdc adc, unsigned channel, uint16_t value)` in `lama.c`
+is registered with `input_set_update_handler()`. Every valid full scan first
+publishes the snapshot, then calls the hook once for each of the 11 channels.
+`INPUT_ADC_PICO` identifies Pico ADC0–2; `INPUT_ADC_MCP3208` identifies external
+CH0–7. Together, converter and channel form the key for future menu assignments.
+
+Notifications mean a fresh reading is available, not necessarily that its
+value changed. There is no threshold or smoothing yet. They run on core 0
+outside interrupt context and outside the snapshot lock. Keep the handler
+short and nonblocking so MIDI and ADC polling remain responsive. The registered handler forwards MCP3208 samples to the assignment router;
+channels assigned OFF have no effect. Register NULL to disable notifications. The Pico's built-in ADC uses its own conversion
+hardware; PIO handles the external MCP3208 serial transactions.
+
+## LCD and monk playback
+
+The ST7789 portrait display uses SPI0: CS GP1, SCK GP2, MOSI GP3, D/C GP4,
+reset GP5, and backlight GP6. The baseline assumes 240x320, zero panel offsets,
+RGB color order and inversion enabled, following the earlier display prototype.
+`DISPLAY_SPI_HZ` in `display.h` starts at 12.5 MHz for hardware bring-up.
+This is below the 15.15 MHz limit implied by the ST7789V's 66 ns write-cycle
+specification. Faster speeds need testing with the actual panel and wiring:
+https://dl.espressif.com/dl/schematics/ST7789V_SPEC_V1.0.pdf
+
+The original 30 packed 4bpp frames and palette use 201,632 flash bytes.
+CMake generates a C source file from `assets/` at build time. One reusable
+107,520-byte RAM buffer holds the selected frame expanded 2x to 240x224 RGB565.
+The monk occupies the top 224 rows; the lower 96 rows remain black for future
+menu UI. The initial full-screen clear is also DMA-driven using one repeated
+black byte rather than a second framebuffer.
+
+`display_poll()` runs on core 0 alongside MIDI and ADC polling. Panel reset
+and startup delays use deadlines rather than sleeps. Once initialized, each
+poll expands at most one 120-pixel source row, including 2x horizontal/vertical
+scaling. SPI TX DREQ then paces DMA for the complete pixel image. Polling waits
+for both DMA completion and an idle SPI shifter before releasing CS or reusing
+the image buffer. There is no display DMA interrupt and no PIO allocation.
+Dummy RX data and overrun status are drained after transmission.
+
+At 12.5 MHz, pixel transmission takes approximately 69 ms per monk frame,
+plus incremental decoding and command overhead. Unchanged frames are skipped;
+rapid vowel changes are coalesced to the current state when selecting the next
+frame. Frame starts are capped at 30 Hz, but SPI bandwidth at the initial speed
+limits the actual rate to less than 15 Hz. No tearing synchronization is used.
+
+The audio core publishes a tiny `SoundState` (current vowel and active/release
+state) after each audio buffer under a short lock. The display reads that
+snapshot, leaving the voice owned by core 1. Vowel selects frames 6–29 while
+sounding; silence follows the VST's hold/blink/shuffle animation. External ADC channels start unassigned. Once assigned through the menu,
+the monk follows any resulting changes to the voice vowel.
+
+The firmware currently occupies about 245 KiB flash and 276 KiB static RAM,
+including the voice and display buffers. These are build sizes, not runtime
+performance measurements. Orientation, colors, actual scan/refresh rates and
+combined audio timing still require hardware verification.
+
+Host animation/decoder checks (including all frames and output bounds):
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I. \
+    monk.c build/monk_assets.c tests/test_monk.c -o /tmp/lama-test-monk
+/tmp/lama-test-monk
+```
+
+
+## Input assignment menu
+
+The lower 240x96 LCD area displays four inputs per page, leaving the monk above.
+MCP3208 CH0–3 map to POT 1–4 and CH4–7 map to CV 1–4, matching the net labels
+EX_POT_0..3 and EX_CV_0..3 on U2 in `hw/main/main.kicad_sch`. Pico ADC0–2 remain available through the raw update/snapshot APIs without menu
+assignments; ADC0 additionally feeds the default 1 V/oct pitch path.
+
+- Turn the GP16/17 encoder to select an input (scrolling to the second page).
+- Press the encoder OK switch on GP18 to edit its destination.
+- Turn to choose OFF, PITCH, VOWEL, VOICE, VIBRATO, VIB RATE, GLIDE, ASPIRATION,
+  LEVEL, ATTACK, DECAY, SUSTAIN, or RELEASE.
+- Press OK again to accept. The selected input takes control on its next scan.
+- Press the separate Back switch on GP19 to cancel an uncommitted edit.
+- Back while browsing closes the list; OK reopens it.
+
+Assignments default to OFF. Saved assignments and both ADC calibrations load at
+boot; use Setup > Save settings to persist edits. Cancel leaves the prior
+assignment intact.
+Turning an assignment OFF stops its future updates, leaving the parameter at
+its last value. Assignments affect the voice through the existing core-0 to
+core-1 event queue. Menu assignments do not generate note gates; GP20 provides the CV gate.
+
+First-version control policy: the most recently changed assigned input wins,
+including when several inputs target one parameter. No additive CV modulation
+or soft takeover is implemented. A 16-code threshold relative to the last
+sent reading suppresses small ADC fluctuations, and each source sends no more
+than once per 20 ms. Failed enqueues are retried on subsequent scans.
+This threshold is noise suppression, not voltage calibration or smoothing.
+
+Raw 0..4095 maps to normalized 0..1 for most destinations. Assignable external PITCH spans MIDI
+notes 36..84 (approximately 65.4..1046.5 Hz); ATTACK and DECAY span 0..2 seconds,
+and RELEASE spans 0..4 seconds. CV uses the same raw ADC range for now; bipolar
+scaling, offsets, modulation depth and per-input calibration are future work.
+MIDI notes and controllers have priority as described below. Pico ADC0 and gate GP20 now provide a separate default CV playing path;
+ADC1/2 remain available without fixed voice mappings.
+
+Encoder quadrature edges are captured by a small GPIO interrupt handler on
+core 0 and accumulated to four edges per detent. Illegal two-bit transitions
+are discarded; ordinary bounce reverses its partial step. OK and Back are
+polled with 20 ms debounce, generating one action per press. GPIO16–19 use
+internal pull-ups and assume contacts to ground. Verify direction and detent
+behavior on the actual encoder.
+
+Menu redraws use the same 105 KiB pixel buffer and SPI DMA channel as the monk.
+A frozen view is rendered one row per poll, then sent to LCD rows 224..319.
+It redraws only when the menu revision changes and is prioritized between monk
+frames. No pixel buffer is overwritten while DMA or the SPI shifter is active.
+The 8x8 font is reused from `st7789_mpy`; its MIT notice is in
+`assets/font-LICENSE.txt`.
+
+Host checks for edit/accept/cancel, page navigation, noise/rate limits,
+queue retry, parameter scaling, and bounds-checked rendering:
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I.     menu.c routing.c calibration.c settings_format.c settings.c voice.c \
+    tests/settings_memory.c tests/test_menu.c -lm -o /tmp/lama-test-menu
+/tmp/lama-test-menu
+```
+
+
+## Standalone CV playing and MIDI priority
+
+The local KiCad control schematic is the source of truth for this wiring.
+GP26/ADC0 reads FREQ_CV; GP20 reads the LM393 output named ~GATE on the control
+sheet. The gate is active low, with a pull-up. The R18=20K / R10=30K divider
+scales pitch-jack voltage by 0.6, followed by a unity buffer. With the 3.0 V
+ADC reference, ADC full-scale nominally represents 5 V at the jack.
+
+`cv_pitch.c` implements 1 V/oct with C2 (MIDI 36, 65.4 Hz) at 0 V,
+so 1 V gives C3 and 5 V gives C7 (2093 Hz). `calibration.c` starts with nominal
+ADC counts 819 at 1 V and 3276 at 4 V. The calibration menu replaces those
+points with measured values; verify tracking on the actual board.
+
+On core 0 the ADC hook caches fresh ADC0 pitch. `cv_input_poll()` sends pitch
+changes and polls GP20 each main-loop pass. It waits for the first valid ADC
+scan before enabling gate events. A gate status heartbeat every 10 ms allows
+CV playing to recover if the event queue overflowed. Repeated gate-high status
+does not retrigger the envelope. Gate is not button-debounced. Pulses shorter
+than the main-loop service interval can be missed; verify with the intended
+gate source. Pitch scan rate is nominally 1 kHz.
+
+`voice_control.c` owns arbitration on core 1, with source-tagged events from
+`add_message()` (ADC/panel) and `add_midi_message()` (MIDI):
+
+- With no held MIDI notes, CV gate triggers/releases the voice and the latest
+  panel pitch drives it. No menu assignment or MIDI connection is required.
+- MIDI Note On takes pitch/gate priority. CV pitch and gate remain tracked,
+  but cannot retune or stop a held MIDI note. MIDI retains last-note priority.
+- Releasing the last MIDI note restores the latest CV pitch and gate together.
+  Gate high resumes CV playing; gate low releases the voice normally. Returning
+  to a high CV gate starts the voice through its normal note-on/envelope path.
+- MIDI all-notes-off/reset releases MIDI ownership and restores CV state.
+  Queue overflow releases both note sources; fresh CV status can resume CV.
+- MIDI CC/wheel updates take ownership only of their respective parameters.
+  New MIDI updates refresh a 2-second lease. ADC updates are cached while the
+  parameter is owned. Unrelated parameters remain controllable from the panel.
+- After the lease expires, a 100 ms ramp returns to the latest cached ADC value.
+  Without an ADC assignment the last MIDI value remains. A new MIDI update
+  interrupts any handback and immediately takes priority again.
+
+Assignments among panel sources still use the most recently changed source.
+An external channel assigned PITCH shares the cached panel pitch with ADC0;
+the dedicated ADC0 path also sends changes. There is no CV summing, physical
+MIDI cable detection, sustain-pedal handling, or active-sensing watchdog yet.
+Disconnecting MIDI while a note is held cannot synthesize a missing Note Off.
+
+Host ownership/scaling checks:
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I.     voice_control.c cv_pitch.c calibration.c voice.c tests/test_voice_control.c -lm     -o /tmp/lama-test-voice-control
+/tmp/lama-test-voice-control
+```
+
+
+## Audio diagnostics through the debug probe
+
+`LAMA_AUDIO_DEBUG` defaults ON. Core 0 sends one cumulative summary per second
+on UART0 TX, GP0 (physical pin 1), at 115200 baud, 8N1. Connect target GP0 to
+the probe UART RX signal and connect grounds. Leave probe TX disconnected:
+GP1 is LCD CS and must not be connected as target UART RX. SWD uses its
+separate SWCLK/SWDIO/GND connection. The target's own USB stdio is disabled.
+The debug probe still presents its UART bridge to the host over USB.
+
+`audio_debug_poll()` formats a short line once per second and feeds at most
+eight bytes per UI-loop pass when the UART FIFO has space. UART writes never
+wait for room. No logging occurs inside a DMA interrupt or on the audio core.
+Counters and latest timing remain available to the source debugger as well.
+
+Example (illustrative values, not a hardware measurement):
+
+```text
+audio blocks=172 A/B=85/85 late=0 underrun=0 fill(us) last/avg/max=3500/3450/3700 budget=5804 slow=0 dma=1
+```
+
+- `blocks`: total rendered/submitted buffers, including the initial pair.
+- `A/B`: separate completed DMA block counts, normally alternating.
+- `late`: next RAM buffer was not ready when DMA completed. The PIO FIFO may
+  still cover that gap, so this does not necessarily mean an audible dropout.
+- `underrun`: sticky PIO TXSTALL observations, sampled before each DMA restart.
+  Indicates real FIFO starvation. Repeated checks do not count the same
+  ongoing stall, but multiple stalls within one transfer can coalesce. This
+  is not a count of missing samples or the duration of an interruption.
+- `fill(us) last/avg/max`: time from acquiring a free buffer through message
+  processing, synthesis, DAC packing and submit. Excludes waiting for a free
+  buffer; includes any IRQ preemption during that interval. Average and max
+  are cumulative since boot, including startup.
+- `budget`: actual block duration from the configured PIO divider, rounded
+  down to microseconds (about 5804 us at 150 MHz).
+- `slow`: number of fills longer than that block budget, another diagnostic
+  signal rather than an exact count of audible glitches.
+- `dma`: currently active RAM buffer (0/1), or -1 if neither is transferring.
+
+FIFO is primed before enabling PIO so normal startup does not register as an
+underrun. The audio core publishes a coherent snapshot after each completed
+fill. A hard hang on that core can leave the published counters frozen; a
+breakpoint can itself cause underruns. These statistics need checking on the
+actual board under combined MIDI/CV/display load.
+
+Disable serial output with `cmake -S . -B build -DLAMA_AUDIO_DEBUG=OFF` and
+rebuild. Counters remain collected and available through the snapshot API.
+Official probe wiring reference:
+https://www.raspberrypi.com/documentation/microcontrollers/debug-probe.html
+
+
+## Calibration and persistent settings
+
+Setup now has four entries: Input assignments, ADC calibration, Save
+settings, and Reset defaults. OK opens/accepts; Back returns/cancels.
+An asterisk in the heading marks unsaved settings. Assignment edits are live
+in RAM; accepting an edit is distinct from writing settings to flash.
+
+Choose **Pico ADC** or **MCP3208** inside ADC calibration. Each converter has
+one shared calibration, applied to all its channels:
+
+| Converter | Reference jack/channel | ADC voltage at jack 1 V / 4 V |
+| --- | --- | --- |
+| Pico ADC0–2 | FREQ CV / ADC0 | 0.6 V / 2.4 V |
+| MCP3208 CH0–7 | CV 1 / CH4 | 1.8 V / 2.7 V |
+
+The input conditioning differs: FREQ CV uses a 0.6 divider/unity buffer;
+MCP CV1 uses a 0.3 gain and 1.5 V offset (20K, 30K and 12K summing network).
+The wizard accounts for these circuits to fit **ADC-pin voltage**, rather
+than treating jack voltages as identical across the two paths.
+
+1. Select the converter and apply 1.000 V to its reference jack. Let it settle
+   and press OK. The next 64 samples of that reference channel are averaged.
+2. Apply 4.000 V and repeat. Keep each voltage steady throughout capture.
+3. Review the ADC counts. OK applies the selected converter's calibration;
+   Back cancels and leaves the previous calibration untouched.
+4. Choose Save settings and confirm to retain both calibrations and assignments.
+
+Captures reject more than 16 counts of spread, near-rail readings, reversed or
+implausible spans and non-finite values. Only the selected converter/reference
+channel contributes samples to its capture. This is a shared converter-level
+correction; differences among individual channels' resistors are not measured.
+
+Nominal defaults are Pico 819/3276 counts and MCP3208 2457/3685.5 counts at
+jack 1 V/4 V. Corrected ADC voltage comes from linear interpolation/extrapolation
+between these points; normalized values divide ADC-pin voltage by 3.0 V and
+clamp to 0..1. Snapshot raw readings and the raw update callback stay unchanged.
+The default bipolar MCP CV input therefore remains centered around 0.5 at
+0 V jack input. This change does not turn it into a unipolar 1 V/oct input.
+External assignments retain their existing parameter ranges, using corrected
+normalized values. Calibration changes force unchanged assigned readings to
+refresh; the dedicated Pico pitch path also refreshes when its bank changes.
+
+Pico frequency voltage additionally divides ADC-pin voltage by 0.6, then uses
+1 V/oct with C2 at 0 V. Corrected Pico ADC1/2 values are available in snapshots
+for future vowel routing; the unused vowel controls gain no fixed mapping.
+
+Reset defaults restores OFF assignments and nominal calibration for **both**
+converters in RAM. A separate Save settings makes that reset persistent.
+A failed save is displayed and can be retried.
+
+Storage uses the final two 4 KiB flash sectors of the 4 MiB Pico 2: offsets
+0x3FE000 and 0x3FF000. Each record is one 256-byte page with magic, schema
+version, sequence number, eight stable assignment IDs, two float calibration
+points per converter, and CRC32. Version 2 stores both converters. Legacy
+version 1 records retain their Pico calibration/assignments and receive the
+nominal MCP3208 calibration; the next changed save uses version 2. Saves erase/program the alternate sector, read it back,
+and leave the previous valid sector intact. Boot selects the newest valid
+record and falls back to defaults if neither validates. Unknown schemas,
+invalid target IDs, invalid calibration and corrupt CRCs are rejected.
+Unchanged saves avoid writing flash. Bump the schema when target IDs change.
+
+A post-build binary-size check and a runtime image-end guard protect the
+reserved region. Storage is intentionally tied to the Pico 2's 4 MiB layout;
+a board/flash-size change requires updating both guards. Ordinary firmware
+updates that do not touch these sectors can retain settings; a full-chip
+erase clears them.
+
+The audio core initializes the Pico SDK flash lockout mechanism. Save requests
+wait for display startup and an idle display DMA channel, then execute the
+flash operation with IRQs disabled and the other core locked out. The flash
+callback and program data are in RAM. Audio DMA/PIO may drain and stall;
+audio/control interruptions and underrun-counter increments during a save are
+expected and accepted. Resume uses the existing buffer recovery path. Flash
+writing and power-interruption recovery still require an on-board check;
+host tests simulate records and partial programming, not physical flash.
+
+Additional host tests:
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I. \
+    calibration.c settings_format.c settings.c routing.c voice.c \
+    tests/settings_memory.c tests/test_settings.c -lm -o /tmp/lama-test-settings
+/tmp/lama-test-settings
+```

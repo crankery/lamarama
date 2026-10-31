@@ -11,22 +11,66 @@
 #include "input.h"
 #include "lama.h"
 #include "soundCore.h"
+#include "midi.h"
+#include "messenger.h"
+#include "menu.h"
+#include "routing.h"
+#include "ui_controls.h"
+#include "cv_input.h"
+#include "audio_debug.h"
+#include "settings.h"
+#include "calibration.h"
+
+static void adc_updated(InputAdc adc, unsigned channel, uint16_t value)
+{
+    if (adc == INPUT_ADC_PICO && channel == 0)
+    {
+        cv_input_pitch(value);
+        calibration_sample(CAL_PICO, value);
+    }
+
+    if (adc == INPUT_ADC_MCP3208 && channel == 4)
+    {
+        calibration_sample(CAL_MCP3208, value);
+    }
+
+    if (adc == INPUT_ADC_MCP3208)
+    {
+        routing_update(channel, value, time_us_64());
+    }
+}
 
 int main()
 {
-    // we wanna use stdio (for debug)
+    // Diagnostics use TX-only UART0 to the debug probe.
     stdio_init_all();
+    audio_debug_init();
+
+    start_messenger();
+    menu_init();
+    settings_load();
+    ui_controls_init();
+    midi_init();
+    cv_input_init();
+    input_set_update_handler(adc_updated);
+    input_init();
 
     // start up the sound core
     sound_core_start();
+    display_init();
 
     // UI loop
     while (true)
     {
-        // poll input
-        //   submit to messenger
-
-        // update display? (maybe it can do something reactive too)
+        midi_poll();
+        ui_controls_poll();
+        poll_controls();
+        cv_input_poll();
+        menu_poll();
+        display_poll();
+        settings_poll(display_ready_for_flash());
+        audio_debug_poll();
+        tight_loop_contents();
     }
 }
 

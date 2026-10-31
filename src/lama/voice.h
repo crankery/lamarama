@@ -15,6 +15,7 @@
  * 8 kHz or above 768 kHz. The comparison is written so NaN fails it. */
 #define MONK_MIN_SAMPLE_RATE 1000.0f
 #define MONK_MAX_SAMPLE_RATE 768000.0f
+
 static inline float monk_sanitize_sample_rate(float sr)
 {
     return (sr >= MONK_MIN_SAMPLE_RATE && sr <= MONK_MAX_SAMPLE_RATE) ? sr : 44100.0f;
@@ -71,6 +72,7 @@ typedef struct
         ENV_SUSTAIN,
         ENV_RELEASE
     } env_stage;
+
     float env_level;   /* current envelope value 0-1 */
     float env_attack;  /* attack time in seconds (0 = instant) */
     float env_decay;   /* decay time in seconds (0 = instant) */

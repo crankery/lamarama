@@ -1,0 +1,21 @@
+; MCP4821: 16-bit command, MSB first, SPI mode 0.
+; Side-set bit 0 = CS (GP11), bit 1 = SCK (GP12).
+; OUT = SDI (GP13), SET = LDAC (GP14).
+; Exactly 256 state-machine cycles per sample, including PULL.
+.program dac
+.side_set 2
+.wrap_target
+    pull block          side 1       ; Stall safely with CS/LDAC high, SCK low
+    set x, 15           side 0
+bitloop:
+    out pins, 1         side 0
+    nop                 side 2       ; DAC samples on rising SCK
+    jmp x-- bitloop     side 0
+    nop                 side 1       ; CS high before LDAC
+    set pins, 0         side 1 [1]   ; LDAC low for two cycles
+    set pins, 1         side 1
+    set x, 24            side 1
+delay:
+    jmp x-- delay       side 1 [7]   ; 25 * 8 = 200 cycles
+    nop                 side 1
+.wrap

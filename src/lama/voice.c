@@ -28,17 +28,25 @@
 
 /* Formant center frequencies (Hz) at five vowel positions [a, e, i, o, u] */
 static const float FORMANT_FREQS[MONK_NUM_FORMANTS][5] = {
-    {280.0f, 450.0f, 800.0f, 350.0f, 270.0f},      /* F1 */
-    {600.0f, 800.0f, 1150.0f, 2000.0f, 2140.0f},   /* F2 */
-    {2240.0f, 2830.0f, 2900.0f, 2800.0f, 2950.0f}, /* F3 */
+    {280.0f, 450.0f, 800.0f, 350.0f, 270.0f},    /* F1 */
+    {600.0f, 800.0f, 1150.0f, 2000.0f, 2140.0f}, /* F2 */
+    {2240.0f, 2830.0f, 2900.0f, 2800.0f, 2950.0f},
+    /* F3 */
 };
 
 /* Formant bandwidths — control exponential decay rate per formant */
-static const float FORMANT_BW[MONK_NUM_FORMANTS] = {32.5f, 47.5f, 62.5f};
+static const float FORMANT_BW[MONK_NUM_FORMANTS] = {
+    32.5f,
+    47.5f,
+    62.5f,
+};
 
 /* NaN-safe: both comparisons are false for NaN, so it maps to lo instead of
  * passing through and turning into INT_MIN at the next float-to-int cast. */
-static inline float clampf(float x, float lo, float hi) { return x > lo ? (x < hi ? x : hi) : lo; }
+static inline float clampf(float x, float lo, float hi)
+{
+    return x > lo ? (x < hi ? x : hi) : lo;
+}
 
 /* Pitch inputs are clamped to the audible range so log2() never sees zero
  * or a negative, and grain_period() stays finite. */
@@ -50,7 +58,9 @@ static inline float clampf(float x, float lo, float hi) { return x > lo ? (x < h
 static void build_sine_table(MonkVoice *v)
 {
     for (int i = 0; i < MONK_SINE_TBL_SIZE; i++)
+    {
         v->sine_tbl[i] = sinf(TAU * (float)i / MONK_SINE_TBL_SIZE);
+    }
 }
 
 /* Catmull-Rom spline interpolation across the five vowel control points.
@@ -61,7 +71,15 @@ static void build_formant_tables(MonkVoice *v)
     for (int f = 0; f < MONK_NUM_FORMANTS; f++)
     {
         const float *pts = FORMANT_FREQS[f];
-        float padded[7] = {pts[0], pts[0], pts[1], pts[2], pts[3], pts[4], pts[4]};
+        float padded[7] = {
+            pts[0],
+            pts[0],
+            pts[1],
+            pts[2],
+            pts[3],
+            pts[4],
+            pts[4],
+        };
 
         for (int seg = 0; seg < 4; seg++)
         {
@@ -95,17 +113,25 @@ static void build_window_and_decay(MonkVoice *v)
     uint32_t release_len = (uint32_t)(sr * 0.007f);
 
     for (uint32_t i = 0; i < n; i++)
+    {
         v->cos_window[i] = 1.0f;
+    }
 
     for (uint32_t i = 0; i < attack_len && i < n; i++)
+    {
         v->cos_window[i] = 0.5f * (1.0f - cosf(PI * (float)i / (float)attack_len));
+    }
 
     for (uint32_t i = release_start; i < n; i++)
+    {
         v->cos_window[i] = 0.5f * (1.0f - cosf(PI * (float)(release_len + i) / (float)release_len));
+    }
 
     float bw = 50.0f * PI;
     for (uint32_t i = 0; i < n * 4; i++)
+    {
         v->exp_decay[i] = expf(-bw * (float)i / sr);
+    }
 }
 
 /* Aspiration noise: two inharmonic sinusoids with exponential decay.
@@ -157,6 +183,7 @@ static float env_tick(MonkVoice *v)
             v->env_level = 1.0f;
             v->env_stage = v->env_decay > 0.0f ? ENV_DECAY : ENV_SUSTAIN;
         }
+
         break;
     case ENV_DECAY:
         rate = v->env_decay > 0.0f ? 1.0f / (v->env_decay * v->sample_rate) : 1.0f;
@@ -166,6 +193,7 @@ static float env_tick(MonkVoice *v)
             v->env_level = v->env_sustain;
             v->env_stage = ENV_SUSTAIN;
         }
+
         break;
     case ENV_SUSTAIN:
         break;
@@ -178,11 +206,13 @@ static float env_tick(MonkVoice *v)
             v->env_stage = ENV_IDLE;
             v->active = false;
         }
+
         break;
     case ENV_IDLE:
     default:
         break;
     }
+
     return v->env_level;
 }
 
@@ -192,9 +222,15 @@ static float lookup_formant(const MonkVoice *v, int formant, float vowel)
     float pos = clampf(vowel, 0.0f, 1.0f) * (MONK_SPLINE_TBL_SIZE - 1);
     int idx = (int)pos;
     if (idx < 0)
+    {
         idx = 0;
+    }
+
     if (idx > MONK_SPLINE_TBL_SIZE - 2)
+    {
         idx = MONK_SPLINE_TBL_SIZE - 2;
+    }
+
     float frac = pos - (float)idx;
     return v->formant_tbl[formant][idx] * (1.0f - frac) + v->formant_tbl[formant][idx + 1] * frac;
 }
@@ -226,6 +262,7 @@ static float grain_period(const MonkVoice *v, float midi_note)
  * ±12 semitones/sec scaled by glide_param. Snaps within 0.2 semitones.
  * At default glide (0.5), one octave takes ~510ms. */
 #define RAMP_TICKS 10
+
 static void apply_portamento(MonkVoice *v)
 {
     if (v->min_glide > 0.001f)
@@ -233,7 +270,10 @@ static void apply_portamento(MonkVoice *v)
         /* XY pad: tick-based linear ramp */
         v->ramp_counter--;
         if (v->ramp_counter > 0)
+        {
             return;
+        }
+
         v->ramp_counter = v->ramp_period;
 
         if (v->pitch_ramp_ticks > 0)
@@ -241,14 +281,19 @@ static void apply_portamento(MonkVoice *v)
             v->pitch_ramp_ticks--;
             v->current_pitch += v->pitch_step;
             if (v->pitch_ramp_ticks == 0)
+            {
                 v->current_pitch = v->target_pitch;
+            }
         }
+
         if (v->vowel_ramp_ticks > 0)
         {
             v->vowel_ramp_ticks--;
             v->current_vowel += v->vowel_step;
             if (v->vowel_ramp_ticks == 0)
+            {
                 v->current_vowel = v->target_vowel;
+            }
         }
     }
     else if (v->glide_param > 0.001f)
@@ -257,11 +302,18 @@ static void apply_portamento(MonkVoice *v)
         float diff = v->target_pitch - v->current_pitch;
         float rate = 12.0f / ((v->glide_param + 0.01f) * v->sample_rate);
         if (diff > 0.2f)
+        {
             v->current_pitch += rate;
+        }
         else if (diff < -0.2f)
+        {
             v->current_pitch -= rate;
+        }
         else
+        {
             v->current_pitch = v->target_pitch;
+        }
+
         v->current_vowel = v->target_vowel;
     }
     else
@@ -289,7 +341,9 @@ static float compute_vibrato(MonkVoice *v)
         /* Wrap in one step; a while loop would never finish on inf. */
         v->vibrato_phase = fmodf(v->vibrato_phase, (float)MONK_SINE_TBL_SIZE);
         if (!(v->vibrato_phase >= 0.0f)) /* NaN or negative */
+        {
             v->vibrato_phase = 0.0f;
+        }
     }
 
     v->jitter_counter++;
@@ -316,7 +370,9 @@ static void compute_grain(MonkVoice *v)
 
     float formants[MONK_NUM_FORMANTS];
     for (int f = 0; f < MONK_NUM_FORMANTS; f++)
+    {
         formants[f] = lookup_formant(v, f, v->current_vowel) * formant_scale;
+    }
 
     uint32_t decay_len = n * 4;
 
@@ -453,6 +509,7 @@ void monk_voice_note_on(MonkVoice *v, float pitch_hz, float velocity)
         v->overlap_write_pos = v->overlap_read_pos;
         v->overlap_offset = 0;
     }
+
     bool has_env = v->env_attack > 0.0f || v->env_decay > 0.0f || v->env_sustain < 1.0f ||
                    v->env_release > 0.0f;
     if (has_env)
@@ -488,7 +545,10 @@ void monk_voice_note_off(MonkVoice *v)
 }
 
 /* Voice is "active" during release too — it's still producing sound. */
-bool monk_voice_is_active(const MonkVoice *v) { return v->active || v->env_stage == ENV_RELEASE; }
+bool monk_voice_is_active(const MonkVoice *v)
+{
+    return v->active || v->env_stage == ENV_RELEASE;
+}
 
 void monk_voice_set_pitch_direct(MonkVoice *v, float hz)
 {
@@ -512,10 +572,14 @@ void monk_voice_set_pitch_target(MonkVoice *v, float hz)
     {
         int n = RAMP_TICKS;
         if (eff > 0.5f)
+        {
             n = RAMP_TICKS + (int)((eff - 0.5f) * 180.0f);
+        }
+
         v->pitch_step = (new_target - v->current_pitch) / (float)n;
         v->pitch_ramp_ticks = n;
     }
+
     v->target_pitch = new_target;
 }
 
@@ -532,10 +596,14 @@ void monk_voice_set_vowel(MonkVoice *v, float vowel)
     {
         int n = RAMP_TICKS;
         if (eff > 0.5f)
+        {
             n = RAMP_TICKS + (int)((eff - 0.5f) * 180.0f);
+        }
+
         v->vowel_step = (new_target - v->current_vowel) / (float)n;
         v->vowel_ramp_ticks = n;
     }
+
     v->target_vowel = new_target;
 }
 
@@ -544,7 +612,10 @@ void monk_voice_set_voice(MonkVoice *v, float voice)
     v->current_voice = clampf(voice, 0.0f, 1.0f);
 }
 
-void monk_voice_set_glide(MonkVoice *v, float glide) { v->glide_param = clampf(glide, 0.0f, 1.0f); }
+void monk_voice_set_glide(MonkVoice *v, float glide)
+{
+    v->glide_param = clampf(glide, 0.0f, 1.0f);
+}
 
 void monk_voice_set_vibrato(MonkVoice *v, float depth)
 {
@@ -566,13 +637,25 @@ void monk_voice_set_aspiration(MonkVoice *v, float amp)
     v->aspiration_amp = clampf(amp, 0.0f, 1.0f);
 }
 
-void monk_voice_set_attack(MonkVoice *v, float seconds) { v->env_attack = seconds; }
-void monk_voice_set_decay(MonkVoice *v, float seconds) { v->env_decay = seconds; }
+void monk_voice_set_attack(MonkVoice *v, float seconds)
+{
+    v->env_attack = seconds;
+}
+
+void monk_voice_set_decay(MonkVoice *v, float seconds)
+{
+    v->env_decay = seconds;
+}
+
 void monk_voice_set_sustain(MonkVoice *v, float level)
 {
     v->env_sustain = clampf(level, 0.0f, 1.0f);
 }
-void monk_voice_set_release(MonkVoice *v, float seconds) { v->env_release = seconds; }
+
+void monk_voice_set_release(MonkVoice *v, float seconds)
+{
+    v->env_release = seconds;
+}
 
 /* Pitch-dependent amplitude compensation. Higher pitches produce shorter
  * grain periods with fewer overlapping grains, so they'd be quieter without
@@ -607,12 +690,15 @@ void monk_voice_process(MonkVoice *v, float *output, uint32_t n)
                 v->overlap_offset = 0;
             }
         }
+
         v->overlap_offset++;
     }
 
     /* Pass 2: read from the overlap buffer, apply envelope */
     while (v->overlap_read_pos >= MONK_OVERLAP_BUF_SIZE)
+    {
         v->overlap_read_pos -= MONK_OVERLAP_BUF_SIZE;
+    }
 
     for (uint32_t i = 0; i < n; i++)
     {
@@ -621,7 +707,9 @@ void monk_voice_process(MonkVoice *v, float *output, uint32_t n)
         v->overlap_read_pos = (v->overlap_read_pos + 1) % MONK_OVERLAP_BUF_SIZE;
 
         if (has_envelope)
+        {
             sample *= env_tick(v);
+        }
 
         output[i] = sample;
     }
@@ -629,8 +717,17 @@ void monk_voice_process(MonkVoice *v, float *output, uint32_t n)
 
 /* ---- Pitch utilities ---- */
 
-float monk_note_to_hz(float note) { return 440.0f * powf(2.0f, (note - 69.0f) / 12.0f); }
+float monk_note_to_hz(float note)
+{
+    return 440.0f * powf(2.0f, (note - 69.0f) / 12.0f);
+}
 
-float monk_hz_to_note(float hz) { return 12.0f * log2f(hz / 440.0f) + 69.0f; }
+float monk_hz_to_note(float hz)
+{
+    return 12.0f * log2f(hz / 440.0f) + 69.0f;
+}
 
-float monk_midi_note_to_freq(uint8_t note) { return monk_note_to_hz((float)note); }
+float monk_midi_note_to_freq(uint8_t note)
+{
+    return monk_note_to_hz((float)note);
+}

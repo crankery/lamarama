@@ -1,0 +1,18 @@
+; MCP3208, mode 0, single-ended, 24 clocks per conversion.
+; Side-set bit 0 = CS (GP7), bit 1 = CLK (GP8).
+; OUT = DIN (GP9), IN = DOUT (GP10).
+; SM clock 2 MHz, SPI clock 500 kHz. FIFO waits occur only with CS high.
+.program mcp3208
+.side_set 2
+.wrap_target
+    pull block          side 1
+    mov isr, null       side 1
+    set x, 23           side 0 [1]
+bitloop:
+    out pins, 1         side 0 [1]
+    in pins, 1          side 2
+    jmp x-- bitloop     side 2
+    nop                 side 0 [1]
+    nop                 side 1 [1]
+    push block          side 1
+.wrap
