@@ -63,6 +63,7 @@ add_executable(lama
     menu.c
     routing.c
     ui_controls.c
+    encoder_steps.c
     ${CMAKE_CURRENT_BINARY_DIR}/monk_assets.c
     lama.c
     midi.c
@@ -89,6 +90,7 @@ pico_set_program_version(lama "0.1")
 
 # Generate PIO header
 pico_generate_pio_header(lama ${CMAKE_CURRENT_LIST_DIR}/dac.pio)
+pico_generate_pio_header(lama ${CMAKE_CURRENT_LIST_DIR}/encoder.pio)
 pico_generate_pio_header(lama ${CMAKE_CURRENT_LIST_DIR}/mcp3208.pio)
 
 # Modify the below lines to enable/disable output over UART/USB

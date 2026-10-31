@@ -1,5 +1,6 @@
 #ifndef LAMA_SETTINGS_H
 #define LAMA_SETTINGS_H
+
 #include <stdbool.h>
 
 typedef enum
@@ -17,4 +18,5 @@ void settings_poll(bool display_ready);
 SettingsStatus settings_status(void);
 bool settings_dirty(void);
 void settings_restore_defaults(void);
+
 #endif

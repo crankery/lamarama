@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+
 extern uint8_t test_flash[2][SETTINGS_PAGE_SIZE];
 extern unsigned test_flash_writes;
 extern bool test_interrupt_write;

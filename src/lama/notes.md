@@ -258,12 +258,12 @@ scaling, offsets, modulation depth and per-input calibration are future work.
 MIDI notes and controllers have priority as described below. Pico ADC0 and gate GP20 now provide a separate default CV playing path;
 ADC1/2 now feed the dedicated vowel CV/pot combination.
 
-Encoder quadrature edges are captured by a small GPIO interrupt handler on
-core 0 and accumulated to four edges per detent. Illegal two-bit transitions
-are discarded; ordinary bounce reverses its partial step. OK and Back are
-polled with 20 ms debounce, generating one action per press. GPIO16–19 use
-internal pull-ups and assume contacts to ground. Verify direction and detent
-behavior on the actual encoder.
+Encoder quadrature edges are counted continuously by PIO2 on GP16/17.
+Core 0 reads accumulated counts about once per millisecond and converts four
+edges to a detent. No GPIO edge interrupts are used. OK and Back are polled
+with 20 ms debounce, generating one action per press. GPIO16–19 use internal
+pull-ups and assume contacts to ground. Verify direction and detent behavior
+on the actual encoder.
 
 Menu redraws use the same 105 KiB pixel buffer and SPI DMA channel as the monk.
 A frozen view is rendered one row per poll, then sent to LCD rows 224..319.
@@ -512,3 +512,41 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I. \
     tests/test_vowel_controls.c -lm -o /tmp/lama-test-vowel
 /tmp/lama-test-vowel
 ```
+
+
+## PIO rotary encoder
+
+`encoder.pio` occupies 27 instructions at address 0 in PIO2, using one state
+machine at 1 MHz. PIO0 remains the DAC and PIO1 the MCP3208. GP16 is the low
+input bit (A), GP17 the high bit (B). A 16-entry previous/current-state jump
+table counts valid quadrature transitions in a wrapping 32-bit Y register;
+unchanged/illegal transitions do nothing. Reverse bounce reverses its count.
+The longest decoder path takes ten cycles, suitable for roughly 100k valid
+edges per second; real hardware debounce/sampling behavior remains to verify.
+
+PIO pushes cumulative counts without blocking into a joined eight-word RX
+FIFO. Core 0 drains at most eight samples per 1 ms poll and never waits for a
+new sample. FIFO-full snapshots can be stale, but Y keeps counting independently,
+so later polls recover the net movement. This adds at most roughly two polls
+of normal delivery latency. During flash saves PIO continues counting while
+the CPUs pause; any motion is delivered after the UI resumes.
+
+`encoder_steps.c` converts modular edge-count differences into detents,
+preserving partial steps and handling both directions through counter wrap.
+`ENCODER_EDGES_PER_DETENT` defaults to four. Decoder sign matches the prior
+GPIO handler for the same A/B pin transitions. The encoder push and Back
+buttons retain GPIO polling/debounce. No encoder DMA or IRQ is needed.
+
+Reference approach:
+https://github.com/raspberrypi/pico-examples/tree/master/pio/quadrature_encoder
+
+```sh
+python3 tests/test_encoder_pio.py
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I. \
+    encoder_steps.c tests/test_encoder_steps.c -o /tmp/lama-test-encoder
+/tmp/lama-test-encoder
+```
+
+The simulation checks startup with all four pin states, both directions,
+contact bounce, ignored invalid transitions, FIFO-full operation, and counter
+wrap. Physical direction and steps per detent still need board verification.

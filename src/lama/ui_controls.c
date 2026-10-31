@@ -1,13 +1,18 @@
 #include "ui_controls.h"
 #include "menu.h"
 #include "hardware/gpio.h"
-#include "hardware/irq.h"
-#include "hardware/sync.h"
+#include "hardware/clocks.h"
+#include "hardware/pio.h"
+#include "encoder.pio.h"
+#include "encoder_steps.h"
 #include "pico/stdlib.h"
 
-static volatile int pending_steps;
-static unsigned previous_ab;
-static int partial_step;
+_Static_assert(ENCODER_B == ENCODER_A + 1, "PIO encoder pins must be consecutive");
+
+static PIO encoder_pio = pio2;
+static uint encoder_sm;
+static EncoderSteps encoder_steps;
+static uint64_t next_encoder_poll;
 
 static struct Button
 {
@@ -15,58 +20,6 @@ static struct Button
     bool raw, stable;
     uint64_t changed;
 } buttons[2];
-
-static unsigned read_encoder(void)
-{
-    uint32_t pins = gpio_get_all();
-    return ((pins >> ENCODER_A) & 1) * 2 + ((pins >> ENCODER_B) & 1);
-}
-
-static void encoder_irq(void)
-{
-    uint32_t edges = GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL;
-    gpio_acknowledge_irq(ENCODER_A, gpio_get_irq_event_mask(ENCODER_A) & edges);
-    gpio_acknowledge_irq(ENCODER_B, gpio_get_irq_event_mask(ENCODER_B) & edges);
-    unsigned current = read_encoder();
-    static const int8_t transitions[16] = {
-        0,
-        -1,
-        1,
-        0,
-        1,
-        0,
-        0,
-        -1,
-        -1,
-        0,
-        0,
-        1,
-        0,
-        1,
-        -1,
-        0,
-    };
-    if ((current ^ previous_ab) == 3)
-    {
-        partial_step = 0;
-    }
-    else
-    {
-        partial_step += transitions[previous_ab * 4 + current];
-    }
-
-    previous_ab = current;
-    if (partial_step >= 4 || partial_step <= -4)
-    {
-        int step = partial_step > 0 ? 1 : -1;
-        if (pending_steps > -128 && pending_steps < 128)
-        {
-            pending_steps += step;
-        }
-
-        partial_step = 0;
-    }
-}
 
 void ui_controls_init(void)
 {
@@ -83,25 +36,53 @@ void ui_controls_init(void)
         gpio_pull_up(pins[i]);
     }
 
-    previous_ab = read_encoder();
+    encoder_sm = pio_claim_unused_sm(encoder_pio, true);
+    uint offset = pio_add_program(encoder_pio, &encoder_program);
+    pio_gpio_init(encoder_pio, ENCODER_A);
+    pio_gpio_init(encoder_pio, ENCODER_B);
+    pio_sm_config config = encoder_program_get_default_config(offset);
+    sm_config_set_in_pins(&config, ENCODER_A);
+    sm_config_set_in_shift(&config, false, false, 32);
+    sm_config_set_out_shift(&config, true, false, 32);
+    sm_config_set_fifo_join(&config, PIO_FIFO_JOIN_RX);
+    sm_config_set_clkdiv(&config, clock_get_hz(clk_sys) / 1000000.0f);
+    pio_sm_init(encoder_pio, encoder_sm, offset + encoder_offset_update, &config);
+    pio_sm_set_consecutive_pindirs(encoder_pio, encoder_sm, ENCODER_A, 2, false);
+    // Seed previous pin state from the real inputs, avoiding a startup edge.
+    pio_sm_exec(encoder_pio, encoder_sm, pio_encode_set(pio_y, 0));
+    pio_sm_exec(encoder_pio, encoder_sm, pio_encode_mov(pio_isr, pio_null));
+    pio_sm_exec(encoder_pio, encoder_sm, pio_encode_in(pio_pins, 2));
+    pio_sm_exec(encoder_pio, encoder_sm, pio_encode_mov(pio_osr, pio_isr));
+    pio_sm_set_enabled(encoder_pio, encoder_sm, true);
     buttons[0] = (struct Button){
         .pin = ENCODER_SW, .raw = gpio_get(ENCODER_SW), .stable = gpio_get(ENCODER_SW)};
     buttons[1] =
         (struct Button){.pin = BACK_SW, .raw = gpio_get(BACK_SW), .stable = gpio_get(BACK_SW)};
-    gpio_add_raw_irq_handler_masked((1u << ENCODER_A) | (1u << ENCODER_B), encoder_irq);
-    gpio_set_irq_enabled(ENCODER_A, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
-    gpio_set_irq_enabled(ENCODER_B, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
-    irq_set_enabled(IO_IRQ_BANK0, true);
 }
 
 void ui_controls_poll(void)
 {
-    uint32_t saved = save_and_disable_interrupts();
-    int steps = pending_steps;
-    pending_steps = 0;
-    restore_interrupts(saved);
-    menu_turn(steps);
     uint64_t now = time_us_64();
+    if (now >= next_encoder_poll)
+    {
+        next_encoder_poll = now + 1000;
+        uint32_t count = encoder_steps.previous;
+        bool received = false;
+        // Bounded drain: never wait for PIO to produce a fresh sample. A full
+        // FIFO contains stale snapshots, but the PIO accumulator keeps counting.
+        // A later poll picks up any movement after those snapshots.
+        for (unsigned i = 0; i < 8 && !pio_sm_is_rx_fifo_empty(encoder_pio, encoder_sm); ++i)
+        {
+            count = pio_sm_get(encoder_pio, encoder_sm);
+            received = true;
+        }
+
+        if (received)
+        {
+            menu_turn(encoder_steps_update(&encoder_steps, count));
+        }
+    }
+
     for (unsigned i = 0; i < 2; ++i)
     {
         bool raw = gpio_get(buttons[i].pin);

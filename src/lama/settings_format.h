@@ -1,5 +1,6 @@
 #ifndef LAMA_SETTINGS_FORMAT_H
 #define LAMA_SETTINGS_FORMAT_H
+
 #include "calibration.h"
 #include "routing.h"
 #define SETTINGS_PAGE_SIZE 256
@@ -14,4 +15,5 @@ void settings_encode(uint8_t page[SETTINGS_PAGE_SIZE], const SavedSettings *sett
                      uint32_t sequence);
 bool settings_decode(const uint8_t page[SETTINGS_PAGE_SIZE], SavedSettings *settings,
                      uint32_t *sequence);
+
 #endif

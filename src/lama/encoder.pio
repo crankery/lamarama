@@ -1,0 +1,45 @@
+; GP16 = A (bit 0), GP17 = B (bit 1). Y holds a wrapping edge count.
+; A computed jump indexes (previous pins << 2) | current pins.
+; Keep the table at address 0 in the otherwise unused PIO2 block.
+; Valid edges count forward/backward; unchanged/illegal transitions do nothing.
+; PUSH never blocks: Y retains movement even when the CPU leaves RX FIFO full.
+; Quadrature counting approach reference:
+; https://github.com/raspberrypi/pico-examples/tree/master/pio/quadrature_encoder
+.program encoder
+.origin 0
+    jmp update
+    jmp increment
+    jmp decrement
+    jmp update
+    jmp decrement
+    jmp update
+    jmp update
+    jmp increment
+    jmp increment
+    jmp update
+    jmp update
+    jmp decrement
+    jmp update
+    jmp decrement
+    jmp increment
+    jmp update
+.wrap_target
+public update:
+    mov isr, y
+    push noblock
+    out isr, 2
+    in pins, 2
+    mov osr, isr
+    mov pc, isr
+
+decrement:
+    jmp y-- decrement_done
+decrement_done:
+    jmp update
+
+increment:
+    mov y, ~y
+    jmp y-- increment_done
+increment_done:
+    mov y, ~y
+.wrap
